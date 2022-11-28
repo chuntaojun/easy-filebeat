@@ -20,10 +20,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//@Author: springliao
-//@Description:
-//@Time: 2021/11/17 15:17
-
 package filebeat
 
 import (
@@ -34,6 +30,7 @@ import (
 
 // cpoy from filebeat
 
+// StateOS 文件的 state 信息
 type StateOS struct {
 	Inode  uint64 `json:"inode," struct:"inode"`
 	Device uint64 `json:"device," struct:"device"`
@@ -52,8 +49,8 @@ func GetOSState(info os.FileInfo) StateOS {
 	return fileState
 }
 
-// IsSame file checks if the files are identical
-func (fs StateOS) IsSame(state StateOS) bool {
+// isSame file checks if the files are identical
+func (fs StateOS) isSame(state StateOS) bool {
 	return fs.Inode == state.Inode && fs.Device == state.Device
 }
 
@@ -65,15 +62,15 @@ func (fs StateOS) String() string {
 	return string(current)
 }
 
-// ReadOpen opens a file for reading only
-func ReadOpen(path string) (*os.File, error) {
+// readOpen opens a file for reading only
+func readOpen(path string) (*os.File, error) {
 	flag := os.O_RDONLY
 	perm := os.FileMode(0)
 	return os.OpenFile(path, flag, perm)
 }
 
-// IsRemoved checks wheter the file held by f is removed.
-func IsRemoved(f *os.File) bool {
+// isRemoved checks wheter the file held by f is removed.
+func isRemoved(f *os.File) bool {
 	stat, err := f.Stat()
 	if err != nil {
 		// if we got an error from a Stat call just assume we are removed
@@ -83,13 +80,13 @@ func IsRemoved(f *os.File) bool {
 	return sysStat.Nlink == 0
 }
 
-// InodeString returns the inode in string.
-func (s *StateOS) InodeString() string {
+// inodeString returns the inode in string.
+func (s *StateOS) inodeString() string {
 	return strconv.FormatUint(s.Inode, 10)
 }
 
-// IsSameFile 判断是否为同一个文件
-func IsSameFile(a, b *os.File) bool {
+// isSameFile 判断是否为同一个文件
+func isSameFile(a, b *os.File) bool {
 
 	as, _ := a.Stat()
 	bs, _ := b.Stat()
