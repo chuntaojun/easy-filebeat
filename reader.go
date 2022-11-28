@@ -20,10 +20,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//@Author: springliao
-//@Description:
-//@Time: 2021/11/17 12:22
-
 package filebeat
 
 import (
@@ -57,15 +53,12 @@ var (
 // if reader will not return any new message on subsequent calls.
 type Reader interface {
 	io.Closer
-
 	// Offset
 	//  @return int64
 	Offset() int64
-
 	// CurFile
 	//  @return *os.File
 	CurFile() *os.File
-
 	// Next
 	//  @return Message
 	//  @return error
@@ -78,16 +71,12 @@ type LineReader struct {
 	originName string
 	curFile    *os.File
 	readOffset *int64
-	reader     *bufio.Reader
+	reader     *bufio.Scanner
 }
 
-// NewLineReader
-//  @param name
-//  @param offset
-//  @return Reader
-//  @return error
+// NewLineReader 构造一个 Reader
 func NewLineReader(name string, offset *int64) (Reader, error) {
-	f, err := ReadOpen(name)
+	f, err := readOpen(name)
 	if err != nil {
 		return nil, err
 	}
@@ -100,31 +89,28 @@ func NewLineReader(name string, offset *int64) (Reader, error) {
 		return *offset + 1
 	}(), io.SeekStart)
 
+	scanner := bufio.NewScanner(f)
+	scanner.Split(bufio.ScanLines)
+
 	return &LineReader{
 		originName: name,
 		curFile:    f,
-		reader:     bufio.NewReader(f),
+		reader:     scanner,
 		readOffset: offset,
 	}, nil
 }
 
 // CurFile
-//  @receiver line
-//  @return *os.File
 func (line *LineReader) CurFile() *os.File {
 	return line.curFile
 }
 
 // Offset
-//  @receiver line
-//  @return int64
 func (line *LineReader) Offset() int64 {
 	return *line.readOffset
 }
 
 // Close
-//  @receiver line
-//  @return error
 func (line *LineReader) Close() error {
 	atomic.StoreInt32(&line.closed, 1)
 	line.reader = nil
@@ -132,18 +118,15 @@ func (line *LineReader) Close() error {
 }
 
 // Next
-//  @receiver line
-//  @return string
-//  @return error
 func (line *LineReader) Next() (string, error) {
 
 	if atomic.LoadInt32(&line.closed) == 1 {
 		return "", ErrorClosed
 	}
 
-	msg, err := line.reader.ReadSlice(delimLabel)
+	if line.reader.Scan() {
+		msg := line.reader.Text()
 
-	if err == nil {
 		// 需要去掉 '\n'
 		// ReadSlice 会把分隔符也一并带上，这里是有问题的，需要单独进行处理把分隔符清理掉
 		res := strings.Split(string(msg), string(delimLabel))
@@ -151,26 +134,28 @@ func (line *LineReader) Next() (string, error) {
 		return res[0], nil
 	}
 
-	if err != nil {
-		if errors.Is(err, io.EOF) {
-			f, err := ReadOpen(line.originName)
-			if err != nil {
-				// 如果当前文件找不到，肯定是文件不一样了
-				if errors.Is(err, os.ErrNotExist) {
-					return "", ErrorRemoved
-				}
-				return "", err
-			}
-
-			// 当前文件已经被删除
-			if IsRemoved(line.curFile) {
+	err := line.reader.Err()
+	if err == nil {
+		err = io.EOF
+	}
+	if errors.Is(err, io.EOF) {
+		f, err := readOpen(line.originName)
+		if err != nil {
+			// 如果当前文件找不到，肯定是文件不一样了
+			if errors.Is(err, os.ErrNotExist) {
 				return "", ErrorRemoved
 			}
+			return "", err
+		}
 
-			// 已经不是同一个日志文件了，并且当前文件已经读完，准备读取新的日志文件
-			if !IsSameFile(line.curFile, f) {
-				return "", ErrorRename
-			}
+		// 当前文件已经被删除
+		if isRemoved(line.curFile) {
+			return "", ErrorRemoved
+		}
+
+		// 已经不是同一个日志文件了，并且当前文件已经读完，准备读取新的日志文件
+		if !isSameFile(line.curFile, f) {
+			return "", ErrorRename
 		}
 	}
 	return "", err

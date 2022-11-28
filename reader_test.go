@@ -20,16 +20,54 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-package filebeat
+package filebeat_test
 
-// Metadata 记录文件处理信息数据
-type Metadata struct {
-	// CurFile 正在处理的文件
-	CurFile string
-	// CurFileINode 当前处理文件的 INode 信息
-	CurFileINode string
-	// CurOffset 正在处理文件的当前读取的位点信息
-	CurOffset int64
-	// PreFileINode 上一个被处理完的文件的 INode 信息
-	PreFileINode string
+import (
+	"errors"
+	"io"
+	"strings"
+	"testing"
+
+	filebeat "github.com/chuntaojun/easy-filebeat"
+)
+
+func Test_ReaderLine(t *testing.T) {
+
+	expectLines := []string{
+		"test_line_log=1",
+		"test_line_log=2",
+		"test_line_log=3",
+		"test_line_log=4",
+		"test_line_log=5",
+		"test_line_log=6",
+		"test_line_log=7",
+		"test_line_log=8",
+		"test_line_log=9",
+		"test_line_log=10",
+	}
+
+	offset := int64(0)
+
+	reader, err := filebeat.NewLineReader("./test_linereader_file.log", &offset)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	index := 0
+	for {
+		msg, err := reader.Next()
+		if err != nil {
+			if errors.Is(err, filebeat.ErrorRemoved) || errors.Is(err, filebeat.ErrorClosed) || errors.Is(err, io.EOF) {
+				t.Log(err)
+				return
+			}
+			t.Fatal(err)
+		}
+
+		if strings.Compare(msg, expectLines[index]) != 0 {
+			t.Fatalf("no equal, expect=[%s], acutal=[%s]", expectLines[index], msg)
+		}
+
+		index++
+	}
 }

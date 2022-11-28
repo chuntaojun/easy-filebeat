@@ -20,10 +20,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//@Author: springliao
-//@Description:
-//@Time: 2021/11/17 12:26
-
 package filebeat
 
 import (
@@ -48,7 +44,7 @@ var (
 	EmptyWaitFiles error = errors.New("empty wait files")
 )
 
-// easy-filebeat 的配置信息
+// Config easy-filebeat 的配置信息
 type Config struct {
 	// Path 监听的文件路径
 	// 支持完全匹配以及正则匹配(监听对应规则的文件)
@@ -62,17 +58,12 @@ type Config struct {
 // Harvester 监听文件变动
 type Harvester interface {
 	io.Closer
-
 	// Init 初始化 Harvester
 	Init() error
-
 	// RegisterSink 注册一个处理文件的 Sink 处理者
-	//  @param sink Sink 的具体实现
 	RegisterSink(sink Sink)
-
 	// Run 执行监听逻辑
 	Run(ctx context.Context)
-
 	// OnError 出现异常时的回掉
 	OnError(err error)
 }
@@ -81,16 +72,13 @@ type Harvester interface {
 func NewHarvester(cfg Config) (Harvester, error) {
 	beater := &harvester{
 		cfg:           cfg,
-		lock:          &sync.RWMutex{},
-		sLock:         &sync.RWMutex{},
-		meta:          &Metadata{},
-		curReader:     &atomic.Value{},
+		meta:          Metadata{},
 		waitDealFiles: make([]os.FileInfo, 0),
 		logger:        cfg.Logger,
 		haveFileCh:    make(chan struct{}, 1),
 	}
 
-	beater.haveFileCond = sync.NewCond(beater.lock)
+	beater.haveFileCond = sync.NewCond(&beater.lock)
 
 	if err := beater.Init(); err != nil {
 		return nil, err
@@ -101,25 +89,25 @@ func NewHarvester(cfg Config) (Harvester, error) {
 
 // harvester
 type harvester struct {
-	lock          *sync.RWMutex
-	sLock         *sync.RWMutex
-	haveFileCond  *sync.Cond
-	cfg           Config
-	curReader     *atomic.Value
-	meta          *Metadata
-	sinks         []Sink
+	lock  sync.RWMutex
+	sLock sync.RWMutex
+
+	cfg       Config
+	curReader atomic.Value
+	meta      Metadata
+	sinks     []Sink
+
 	waitDealFiles []os.FileInfo
-	logger        *logrus.Logger
-	haveFileCh    chan struct{}
+
+	logger *logrus.Logger
+
+	haveFileCond *sync.Cond
+	haveFileCh   chan struct{}
 }
 
 // Init
-//  @receiver beater
-//  @return error
 func (beater *harvester) Init() error {
-
 	metaPath := beater.cfg.MetaPath
-
 	// 之前是否存在元数据记录文件
 	data, err := ioutil.ReadFile(metaPath)
 	if err != nil {
@@ -140,34 +128,36 @@ func (beater *harvester) Init() error {
 	}
 	// 根据 metadat 初始化 Reader
 	if err := beater.initReaderFromMetadata(); err != nil {
-
 		if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 
 		// 如果根据 metadata 里面记录的元数据找不到之前处理过的文件，那就认为是重新开始吧
-		beater.meta = &Metadata{}
+		beater.meta = Metadata{}
 		return beater.initReaderFromMetadata()
-
 	}
 	return nil
 }
 
-// Run
-//  @receiver beater
+// Run 执行监听逻辑
 func (beater *harvester) Run(ctx context.Context) {
 
 	// 开启定时刷新待处理文件列表信息
-	go func() {
+	go func(ctx context.Context) {
 		// 先立马刷新一次
 		beater.refreshWaitDealFileList()
-
 		ticker := time.NewTicker(time.Duration(5 * time.Second))
 
-		for range ticker.C {
-			beater.refreshWaitDealFileList()
+		for {
+			select {
+			case <-ticker.C:
+				beater.refreshWaitDealFileList()
+			case <-ctx.Done():
+				ticker.Stop()
+				return
+			}
 		}
-	}()
+	}(ctx)
 
 	//
 	go func() {
@@ -178,7 +168,7 @@ func (beater *harvester) Run(ctx context.Context) {
 	}()
 
 	//
-	go func() {
+	go func(ctx context.Context) {
 		// 元数据没有任何信息
 		if beater.curReader.Load() == nil {
 			if err := beater.initReaderFromWait(); err != nil {
@@ -186,22 +176,24 @@ func (beater *harvester) Run(ctx context.Context) {
 				return
 			}
 		}
+
+		ticker := time.NewTicker(time.Duration(50 * time.Millisecond))
+
 		for {
 			select {
 			case <-ctx.Done():
+				ticker.Stop()
 				return
-			default:
+			case <-ticker.C:
 				beater.innerRun()
 			}
 		}
-	}()
+	}(ctx)
 }
 
 func (beater *harvester) innerRun() {
 	for {
-
 		curReader := beater.curReader.Load().(Reader)
-
 		msg, err := curReader.Next()
 		if err != nil {
 			switch err {
@@ -210,7 +202,7 @@ func (beater *harvester) innerRun() {
 				beater.switchNextFile()
 			case io.EOF:
 				// 当前日志文件还没触发切换，也没有新的数据可供读取，因此进入重试等待
-				goto WAIT
+				return
 			case os.ErrNotExist:
 				// 不存在文件
 				fallthrough
@@ -229,10 +221,6 @@ func (beater *harvester) innerRun() {
 			beater.reportAndSyncMetadata()
 			continue
 		}
-
-	WAIT:
-		// 避免空转太多
-		time.Sleep(time.Duration(50) * time.Millisecond)
 	}
 }
 
@@ -241,8 +229,9 @@ func (beater *harvester) OnError(err error) {
 }
 
 // RegisterSink 注册一个 Sink 用与接收处理 harvester 获取的每行数据
-//  @receiver beater
-//  @param sink
+//
+//	@receiver beater
+//	@param sink
 func (beater *harvester) RegisterSink(sink Sink) {
 	beater.sLock.Lock()
 	defer beater.sLock.Unlock()
@@ -251,15 +240,14 @@ func (beater *harvester) RegisterSink(sink Sink) {
 }
 
 // Close
-//  @receiver beater
-//  @return error
+//
+//	@receiver beater
+//	@return error
 func (beater *harvester) Close() error {
 	return beater.curReader.Load().(Reader).Close()
 }
 
 // initReaderFromMetadata
-//  @receiver beater
-//  @return error
 func (beater *harvester) initReaderFromMetadata() error {
 
 	if beater.meta.CurFile != "" {
@@ -275,7 +263,8 @@ func (beater *harvester) initReaderFromMetadata() error {
 }
 
 // initReaderFromWait
-//  @receiver beater
+//
+//	@receiver beater
 func (beater *harvester) initReaderFromWait() error {
 
 	beater.lock.Lock()
@@ -307,7 +296,8 @@ func (beater *harvester) initReaderFromWait() error {
 }
 
 // refreshWaitDealFileList 定时刷新当前待处理的文件列表
-//  @receiver beater
+//
+//	@receiver beater
 func (beater *harvester) refreshWaitDealFileList() {
 	ticker := time.NewTicker(time.Duration(5 * time.Second))
 
@@ -319,8 +309,9 @@ func (beater *harvester) refreshWaitDealFileList() {
 }
 
 // setWaitDealFiles 更新待处理的文件列表
-//  @receiver beater
-//  @return error
+//
+//	@receiver beater
+//	@return error
 func (beater *harvester) setWaitDealFiles() error {
 	var (
 		result []os.FileInfo
@@ -359,8 +350,9 @@ func (beater *harvester) setWaitDealFiles() error {
 }
 
 // switchNextFile
-//  @receiver beater
-//  @return error
+//
+//	@receiver beater
+//	@return error
 func (beater *harvester) switchNextFile() error {
 	// 关闭之前的文件 Reader
 	old := beater.curReader.Load()
@@ -392,9 +384,10 @@ func (beater *harvester) switchNextFile() error {
 }
 
 // ignoreAlreadDeal
-//  @receiver beater
-//  @param source
-//  @return []os.FileInfo
+//
+//	@receiver beater
+//	@param source
+//	@return []os.FileInfo
 func (beater *harvester) ignoreAlreadDeal(source []os.FileInfo) []os.FileInfo {
 
 	// 按照修改时间进行逆序排序
@@ -419,9 +412,10 @@ func (beater *harvester) ignoreAlreadDeal(source []os.FileInfo) []os.FileInfo {
 }
 
 // loadCurFiles 获取要监听的日志目录下的所有日志文件信息
-//  @receiver beater
-//  @return []os.FileInfo
-//  @return error
+//
+//	@receiver beater
+//	@return []os.FileInfo
+//	@return error
 func (beater *harvester) loadCurFiles() ([]os.FileInfo, error) {
 	parentDir := filepath.Dir(beater.cfg.Path)
 
@@ -448,8 +442,7 @@ func (beater *harvester) loadCurFiles() ([]os.FileInfo, error) {
 	return target, nil
 }
 
-// reportAndSyncMetadata
-//  @receiver beater
+// reportAndSyncMetadata 上报当前的数据处理情况
 func (beater *harvester) reportAndSyncMetadata() {
 	// TODO 这里目前是实时落盘，感觉这里可以用 mmap 的方式，加快写的速度，然后将落盘的时机转交操作系统完成
 	data, _ := json.Marshal(beater.meta)

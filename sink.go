@@ -20,16 +20,10 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//@Author: springliao
-//@Description:
-//@Time: 2021/11/17 12:22
-
 package filebeat
 
-// Sink
+// Sink handle log each line
 type Sink interface {
-
 	// OnMessage
-	//  @param msg
 	OnMessage(msg string)
 }
