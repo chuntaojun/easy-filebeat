@@ -328,7 +328,6 @@ func (beater *harvester) setWaitDealFiles() error {
 		result = beater.ignoreAlreadDeal(result)
 
 		if len(result) == 0 {
-			beater.logger.Info("cur dir is empty, so wait 200 mill and scan again")
 			time.Sleep(time.Duration(200 * time.Millisecond))
 		} else {
 			break
