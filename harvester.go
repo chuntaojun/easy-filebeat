@@ -101,6 +101,8 @@ type harvester struct {
 
 	logger *logrus.Logger
 
+	parentDir string
+
 	haveFileCond *sync.Cond
 	haveFileCh   chan struct{}
 }
@@ -122,7 +124,7 @@ func (beater *harvester) Init() error {
 			return nil
 		}
 		// 读取上次工作的元数据文件信息
-		if err := json.Unmarshal(data, beater.meta); err != nil {
+		if err := json.Unmarshal(data, &beater.meta); err != nil {
 			return err
 		}
 	}
@@ -144,14 +146,18 @@ func (beater *harvester) Run(ctx context.Context) {
 
 	// 开启定时刷新待处理文件列表信息
 	go func(ctx context.Context) {
-		// 先立马刷新一次
-		beater.refreshWaitDealFileList()
-		ticker := time.NewTicker(time.Duration(5 * time.Second))
+		// 设置待处理文件列表信息数据
+		if err := beater.setWaitDealFiles(); err != nil {
+			beater.OnError(err)
+		}
 
+		ticker := time.NewTicker(time.Duration(5 * time.Second))
 		for {
 			select {
 			case <-ticker.C:
-				beater.refreshWaitDealFileList()
+				if err := beater.setWaitDealFiles(); err != nil {
+					beater.logger.Errorf("set wait deail files fail : %+v", err)
+				}
 			case <-ctx.Done():
 				ticker.Stop()
 				return
@@ -160,20 +166,19 @@ func (beater *harvester) Run(ctx context.Context) {
 	}(ctx)
 
 	//
-	go func() {
-		// 设置待处理文件列表信息数据
-		if err := beater.setWaitDealFiles(); err != nil {
-			beater.OnError(err)
-		}
-	}()
-
-	//
 	go func(ctx context.Context) {
-		// 元数据没有任何信息
-		if beater.curReader.Load() == nil {
-			if err := beater.initReaderFromWait(); err != nil {
-				beater.OnError(err)
-				return
+		for {
+			// 元数据没有任何信息
+			if beater.curReader.Load() == nil {
+				if err := beater.initReaderFromWait(); err != nil {
+					// if errors.Is(err, os.ErrNotExist) {
+					// 	continue
+					// }
+					beater.OnError(err)
+					time.Sleep(100 * time.Millisecond)
+				} else {
+					break
+				}
 			}
 		}
 
@@ -201,6 +206,7 @@ func (beater *harvester) innerRun() {
 				// 切换文件，转到下一个要处理的
 				beater.switchNextFile()
 			case io.EOF:
+				// 读完当前文件了，重新再 Open 一次，有可能还能在继续读
 				// 当前日志文件还没触发切换，也没有新的数据可供读取，因此进入重试等待
 				return
 			case os.ErrNotExist:
@@ -225,7 +231,7 @@ func (beater *harvester) innerRun() {
 }
 
 func (beater *harvester) OnError(err error) {
-	beater.logger.Errorf("harvester onError : %s", err.Error())
+	beater.logger.Errorf("harvester onError : %+v", err)
 }
 
 // RegisterSink 注册一个 Sink 用与接收处理 harvester 获取的每行数据
@@ -281,7 +287,8 @@ func (beater *harvester) initReaderFromWait() error {
 	beater.lock.Unlock()
 
 	// 构造行读取 Reader
-	curReader, err := NewLineReader(waitDeal.Name(), &beater.meta.CurOffset)
+	fileName := filepath.Join(beater.parentDir, waitDeal.Name())
+	curReader, err := NewLineReader(fileName, &beater.meta.CurOffset)
 	if err != nil {
 		return err
 	}
@@ -293,19 +300,6 @@ func (beater *harvester) initReaderFromWait() error {
 
 	beater.curReader.Store(curReader)
 	return nil
-}
-
-// refreshWaitDealFileList 定时刷新当前待处理的文件列表
-//
-//	@receiver beater
-func (beater *harvester) refreshWaitDealFileList() {
-	ticker := time.NewTicker(time.Duration(5 * time.Second))
-
-	for range ticker.C {
-		if err := beater.setWaitDealFiles(); err != nil {
-			continue
-		}
-	}
 }
 
 // setWaitDealFiles 更新待处理的文件列表
@@ -326,7 +320,6 @@ func (beater *harvester) setWaitDealFiles() error {
 
 		// 如果当前获取到的文件列表为空
 		result = beater.ignoreAlreadDeal(result)
-
 		if len(result) == 0 {
 			time.Sleep(time.Duration(200 * time.Millisecond))
 		} else {
@@ -416,10 +409,13 @@ func (beater *harvester) ignoreAlreadDeal(source []os.FileInfo) []os.FileInfo {
 //	@return []os.FileInfo
 //	@return error
 func (beater *harvester) loadCurFiles() ([]os.FileInfo, error) {
-	parentDir := filepath.Dir(beater.cfg.Path)
+	beater.parentDir = filepath.Dir(beater.cfg.Path)
 
-	fList, err := ioutil.ReadDir(parentDir)
+	fList, err := ioutil.ReadDir(beater.parentDir)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return []os.FileInfo{}, nil
+		}
 		return nil, err
 	}
 

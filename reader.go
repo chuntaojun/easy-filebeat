@@ -29,6 +29,7 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"unicode/utf8"
 )
 
 var (
@@ -72,6 +73,8 @@ type LineReader struct {
 	curFile    *os.File
 	readOffset *int64
 	reader     *bufio.Scanner
+	lastData   []byte
+	pre        string
 }
 
 // NewLineReader 构造一个 Reader
@@ -81,23 +84,29 @@ func NewLineReader(name string, offset *int64) (Reader, error) {
 		return nil, err
 	}
 
-	// 设置文件读取的位置信息数据
-	f.Seek(func() int64 {
-		if *offset == 0 {
-			return *offset
-		}
-		return *offset + 1
-	}(), io.SeekStart)
-
-	scanner := bufio.NewScanner(f)
-	scanner.Split(bufio.ScanLines)
-
-	return &LineReader{
+	r := &LineReader{
 		originName: name,
 		curFile:    f,
-		reader:     scanner,
 		readOffset: offset,
-	}, nil
+		lastData:   make([]byte, 1),
+	}
+
+	// 设置文件读取的位置信息数据
+	r.seek()
+	return r, nil
+}
+
+func (line *LineReader) seek() {
+	line.curFile.Seek(func() int64 {
+		if *line.readOffset == 0 {
+			return *line.readOffset
+		}
+		return *line.readOffset + 1
+	}(), io.SeekStart)
+
+	scanner := bufio.NewScanner(line.curFile)
+	scanner.Split(bufio.ScanLines)
+	line.reader = scanner
 }
 
 // CurFile
@@ -117,6 +126,8 @@ func (line *LineReader) Close() error {
 	return line.curFile.Close()
 }
 
+var ()
+
 // Next
 func (line *LineReader) Next() (string, error) {
 
@@ -125,13 +136,34 @@ func (line *LineReader) Next() (string, error) {
 	}
 
 	if line.reader.Scan() {
+		var (
+			ret string
+			err error
+		)
+
 		msg := line.reader.Text()
+		_, err = line.curFile.ReadAt(line.lastData, *line.readOffset+int64(len(msg))+1)
 
 		// 需要去掉 '\n'
 		// ReadSlice 会把分隔符也一并带上，这里是有问题的，需要单独进行处理把分隔符清理掉
 		res := strings.Split(string(msg), string(delimLabel))
 		(*line.readOffset) += int64(len(msg))
-		return res[0], nil
+
+		switchLineRune := '\n'
+
+		lastRune, _ := utf8.DecodeRune(line.lastData)
+
+q		if lastRune == switchLineRune {
+			*line.readOffset += 1
+			ret = line.pre + res[0]
+			line.lastData[0] = byte(0)
+			line.pre = ""
+		} else {
+			line.pre += res[0]
+			ret = ""
+			err = io.EOF
+		}
+		return ret, err
 	}
 
 	err := line.reader.Err()
@@ -157,6 +189,8 @@ func (line *LineReader) Next() (string, error) {
 		if !isSameFile(line.curFile, f) {
 			return "", ErrorRename
 		}
+		line.curFile = f
+		line.seek()
 	}
 	return "", err
 }
