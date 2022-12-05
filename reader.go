@@ -153,7 +153,7 @@ func (line *LineReader) Next() (string, error) {
 
 		lastRune, _ := utf8.DecodeRune(line.lastData)
 
-q		if lastRune == switchLineRune {
+		if lastRune == switchLineRune {
 			*line.readOffset += 1
 			ret = line.pre + res[0]
 			line.lastData[0] = byte(0)
